@@ -1127,7 +1127,7 @@ const Index = () => {
                           ) : field === 'delete' ? (
                             <SelectItem value="0">0</SelectItem>
                           ) : field === 'cultura' ? (
-                            ['Forrageira'].map(option => (
+                            ['Forrageiras'].map(option => (
                               <SelectItem key={option} value={option}>
                                 {option}
                               </SelectItem>
