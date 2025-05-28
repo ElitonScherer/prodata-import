@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import FileUpload from '@/components/FileUpload';
 import { Button } from '@/components/ui/button';
-import { Database, X, Check, List } from 'lucide-react';
+import { Database, X, Check, List, AlertTriangle, Loader } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import {
   Select,
@@ -29,6 +29,7 @@ import {
   TabsTrigger,
 } from "@/components/ui/tabs";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
 
 interface AuthCredentials {
   email: string;
@@ -44,7 +45,6 @@ interface AuthResponse {
   assentamento: string;
   token: string;
 }
-
 
 interface AmostraResponse {
   id: number;
@@ -416,9 +416,23 @@ const Index = () => {
   const [verifiedSamples, setVerifiedSamples] = useState<{
     found: string[];
     notFound: string[];
+    withAnalysis: string[];
+    withoutAnalysis: string[];
   }>({
     found: [],
     notFound: [],
+    withAnalysis: [],
+    withoutAnalysis: [],
+  });
+  const [failedAnalyses, setFailedAnalyses] = useState<string[]>([]);
+  const [verificationProgress, setVerificationProgress] = useState<{
+    total: number;
+    processed: number;
+    currentSample: string;
+  }>({
+    total: 0,
+    processed: 0,
+    currentSample: '',
   });
   const { toast } = useToast();
 
@@ -625,8 +639,6 @@ const Index = () => {
 
         postassio = ((k < (ctcph * (3 / 100))) ? (((((ctcph * (3 / 100.0)) - k) * 391.0)*1.2)*2.0) : 0);
 
-
-
         mappedValues['sb'] = sb;
         mappedValues['ctc'] = ctc;
         mappedValues['ctcph'] = ctcph;
@@ -635,8 +647,6 @@ const Index = () => {
         mappedValues['nc']=Qc;
         mappedValues['fosfatagem']=fosfat;
         mappedValues['potassio']=postassio;
-
-
 
         mappedValues['classtext'] = classTextura(areia/10, argila/10, silte/10);
       } catch (error) {
@@ -743,7 +753,7 @@ const Index = () => {
         variant: "destructive",
       });
       setIsLoading(false);
-      throw error; // Re-throw the error to stop the process
+      throw error;
     }
   };
 
@@ -903,10 +913,8 @@ const Index = () => {
     
     const responseData = await response.json();
     
-    // Se estiver na aba "analises", faz a requisição adicional para classificação
     if (activeTab === "analises") {
       try {
-        // Preparando os dados para a classificação
         const classificacaoDTO: ClassificacaoDTO = {
           id_user: selectedUserId,
           id_produtor: rowData.id_produtor,
@@ -956,7 +964,7 @@ const Index = () => {
         console.log("Resposta da classificação:", classificacaoResult);
       } catch (error) {
         console.error("Erro ao enviar dados de classificação:", error);
-        throw error; // Propaga o erro para interromper o processo
+        throw error;
       }
     }
     
@@ -1004,9 +1012,16 @@ const Index = () => {
       }
 
       setIsLoading(true);
+      setVerificationProgress({
+        total: data.length,
+        processed: 0,
+        currentSample: '',
+      });
       
       const found: string[] = [];
       const notFound: string[] = [];
+      const withAnalysis: string[] = [];
+      const withoutAnalysis: string[] = [];
       
       for (let i = 0; i < data.length; i++) {
         try {
@@ -1014,8 +1029,17 @@ const Index = () => {
           const codigo = row[columnMapping['codigo']];
           
           if (!codigo) {
+            setVerificationProgress(prev => ({
+              ...prev,
+              processed: prev.processed + 1,
+            }));
             continue;
           }
+
+          setVerificationProgress(prev => ({
+            ...prev,
+            currentSample: codigo,
+          }));
           
           const response = await fetch(
             `https://prodata.up.railway.app/solovivo/amostra/buscar/${codigo}`,
@@ -1029,26 +1053,50 @@ const Index = () => {
 
           if (response.status === 200) {
             found.push(codigo);
+            
+            try {
+              const analysisResponse = await fetch(
+                `https://prodata.up.railway.app/solovivo/analise/buscar/${codigo}`,
+                {
+                  method: 'GET',
+                  headers: {
+                    'Authorization': authToken,
+                  },
+                }
+              );
+
+              if (analysisResponse.status === 200) {
+                withAnalysis.push(codigo);
+              } else {
+                withoutAnalysis.push(codigo);
+              }
+            } catch (error) {
+              console.error('Erro ao verificar análise:', error);
+              withoutAnalysis.push(codigo);
+            }
           } else {
             notFound.push(codigo);
           }
           
-          setImportProgress(prev => ({
+          setVerificationProgress(prev => ({
             ...prev,
             processed: prev.processed + 1,
           }));
           
         } catch (error) {
           console.error('Erro ao verificar amostra:', error);
-          break; // Interrompe o processo em caso de erro
+          setVerificationProgress(prev => ({
+            ...prev,
+            processed: prev.processed + 1,
+          }));
         }
       }
       
-      setVerifiedSamples({ found, notFound });
+      setVerifiedSamples({ found, notFound, withAnalysis, withoutAnalysis });
       
       toast({
         title: "Verificação concluída",
-        description: `${found.length} amostras encontradas e ${notFound.length} não encontradas.`,
+        description: `${found.length} amostras encontradas (${withAnalysis.length} com análise, ${withoutAnalysis.length} sem análise) e ${notFound.length} não encontradas.`,
       });
       
     } catch (error) {
@@ -1060,6 +1108,11 @@ const Index = () => {
       });
     } finally {
       setIsLoading(false);
+      setVerificationProgress({
+        total: 0,
+        processed: 0,
+        currentSample: '',
+      });
     }
   };
 
@@ -1099,6 +1152,7 @@ const Index = () => {
 
       setIsLoading(true);
       setDuplicateItems([]);
+      setFailedAnalyses([]);
       setImportProgress({
         total: data.length,
         processed: 0,
@@ -1108,6 +1162,7 @@ const Index = () => {
 
       const results = [];
       const newDuplicates: DuplicateItem[] = [];
+      const newFailedAnalyses: string[] = [];
       
       for (let i = 0; i < data.length; i++) {
         try {
@@ -1140,6 +1195,17 @@ const Index = () => {
           try {
             if (activeTab === "analises") {
               finalValues = await adicionarDados(mappedValues);
+              
+              if (finalValues['id_produtor'] === null || finalValues['id_produtor'] === undefined) {
+                newFailedAnalyses.push(code);
+                setImportProgress(prev => ({
+                  total: prev.total,
+                  processed: prev.processed + 1,
+                  success: prev.success,
+                  failed: prev.failed + 1
+                }));
+                continue;
+              }
             } else {
               finalValues = await adicionarDadosAmostra(mappedValues);
             }
@@ -1151,7 +1217,7 @@ const Index = () => {
               success: prev.success,
               failed: prev.failed + 1
             }));
-            break; // Stop the process if there's an error
+            break;
           }
 
           const apiData = transformToApiFormat(finalValues);
@@ -1172,17 +1238,26 @@ const Index = () => {
             processed: prev.processed + 1,
             failed: prev.failed + 1
           }));
-          break; // Stop the process if there's an error
+          break;
         }
       }
 
       setDuplicateItems(newDuplicates);
+      setFailedAnalyses(newFailedAnalyses);
       const successCount = results.filter(r => r.success).length;
       
       if (newDuplicates.length > 0) {
         toast({
           title: `${newDuplicates.length} ${activeTab === 'analises' ? 'análises' : 'amostras'} já cadastradas`,
           description: `Os seguintes itens não foram inseridos pois já estão cadastrados: ${newDuplicates.map(item => item.codigo).join(', ')}`,
+          variant: "destructive",
+        });
+      }
+
+      if (newFailedAnalyses.length > 0) {
+        toast({
+          title: `${newFailedAnalyses.length} análises não cadastradas`,
+          description: `As seguintes análises não foram cadastradas por não ter produtor associado: ${newFailedAnalyses.join(', ')}`,
           variant: "destructive",
         });
       }
@@ -1217,7 +1292,8 @@ const Index = () => {
       failed: 0,
     });
     setDuplicateItems([]);
-    setVerifiedSamples({ found: [], notFound: [] });
+    setFailedAnalyses([]);
+    setVerifiedSamples({ found: [], notFound: [], withAnalysis: [], withoutAnalysis: [] });
   };
 
   const getMappedFieldsCount = () => {
@@ -1335,7 +1411,6 @@ const Index = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                   {getCurrentDbFields()
                     .filter(field => field !== 'data' && field !== 'delete')
-                    
                     .map((field) => (
                     <div key={field} className="space-y-1">
                       <label htmlFor={`field-${field}`} className="text-sm font-medium">
@@ -1393,7 +1468,7 @@ const Index = () => {
               
               <TabsContent value="amostras" className="space-y-4">
                 <p className="mb-4 text-sm text-gray-600">
-                  Selecione a coluna da planilha que contém os códigos das amostras para verificar se já estão cadastradas.
+                  Selecione a coluna da planilha que contém os códigos das amostras para verificar se já estão cadastradas e se possuem análises.
                 </p>
                 
                 <div className="grid grid-cols-1 gap-4">
@@ -1420,6 +1495,36 @@ const Index = () => {
                     </Select>
                   </div>
                 </div>
+
+                {isLoading && activeTab === "amostras" && (
+                  <Card className="border-blue-200">
+                    <CardHeader className="bg-blue-50">
+                      <CardTitle className="flex items-center text-blue-700">
+                        <Loader className="w-5 h-5 mr-2 animate-spin" />
+                        Verificando Amostras
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="pt-4 space-y-4">
+                      <div className="space-y-2">
+                        <div className="flex justify-between text-sm text-gray-600">
+                          <span>Progresso: {verificationProgress.processed} / {verificationProgress.total}</span>
+                          <span>{Math.round((verificationProgress.processed / verificationProgress.total) * 100)}%</span>
+                        </div>
+                        <Progress 
+                          value={(verificationProgress.processed / verificationProgress.total) * 100} 
+                          className="w-full h-3"
+                        />
+                      </div>
+                      
+                      {verificationProgress.currentSample && (
+                        <div className="text-center">
+                          <p className="text-sm text-gray-500">Verificando amostra:</p>
+                          <p className="font-medium text-blue-700">{verificationProgress.currentSample}</p>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
               </TabsContent>
             </Tabs>
           </div>
@@ -1461,6 +1566,22 @@ const Index = () => {
               </div>
             </div>
           )}
+
+          {failedAnalyses.length > 0 && activeTab === "analises" && (
+            <div className="bg-white p-4 border rounded-lg border-red-500">
+              <h3 className="text-lg font-medium mb-2 text-red-700">Análises não cadastradas</h3>
+              <p className="text-sm text-gray-700 mb-2">
+                As seguintes análises não foram cadastradas por não ter produtor associado:
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {failedAnalyses.map((codigo, index) => (
+                  <span key={index} className="px-2 py-1 bg-red-100 text-red-800 rounded text-sm">
+                    {codigo}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           
           {(verifiedSamples.found.length > 0 || verifiedSamples.notFound.length > 0) && activeTab === "amostras" && (
             <div className="space-y-4">
@@ -1476,6 +1597,46 @@ const Index = () => {
                     <div className="flex flex-wrap gap-2">
                       {verifiedSamples.found.map((codigo, index) => (
                         <span key={index} className="px-2 py-1 bg-green-100 text-green-800 rounded text-sm">
+                          {codigo}
+                        </span>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {verifiedSamples.withAnalysis.length > 0 && (
+                <Card>
+                  <CardHeader className="bg-blue-50">
+                    <CardTitle className="flex items-center text-blue-700">
+                      <Check className="w-5 h-5 mr-2" />
+                      Amostras com Análises ({verifiedSamples.withAnalysis.length})
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-4">
+                    <div className="flex flex-wrap gap-2">
+                      {verifiedSamples.withAnalysis.map((codigo, index) => (
+                        <span key={index} className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-sm">
+                          {codigo}
+                        </span>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {verifiedSamples.withoutAnalysis.length > 0 && (
+                <Card>
+                  <CardHeader className="bg-orange-50">
+                    <CardTitle className="flex items-center text-orange-700">
+                      <AlertTriangle className="w-5 h-5 mr-2" />
+                      Amostras sem Análises ({verifiedSamples.withoutAnalysis.length})
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="pt-4">
+                    <div className="flex flex-wrap gap-2">
+                      {verifiedSamples.withoutAnalysis.map((codigo, index) => (
+                        <span key={index} className="px-2 py-1 bg-orange-100 text-orange-800 rounded text-sm">
                           {codigo}
                         </span>
                       ))}
@@ -1511,7 +1672,7 @@ const Index = () => {
               {data.length} registros encontrados na planilha.
             </p>
             <Button
-              onClick={handleImport}
+              onClick={activeTab === "amostras" ? verifySamples : handleImport}
               disabled={!areRequiredFieldsMapped() || (!selectedDate && activeTab === "analises") || isLoading}
               className="gap-2"
             >
